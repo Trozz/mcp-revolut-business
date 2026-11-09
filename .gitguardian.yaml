@@ -1,0 +1,7 @@
+version: 2
+paths_ignore:
+  - "crates/mcp-revolut-business-banking/tests/fixtures/**"
+secret:
+  ignored_matches:
+    - name: test-only Revolut API key placeholder
+      match: r_test_placeholder0000000000000000000000000000000000000000000000
