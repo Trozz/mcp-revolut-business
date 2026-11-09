@@ -6,7 +6,6 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint is pulled in by jsonwebtoken rust_crypto (p256/p384) but only HS256 (HMAC) is used in mcp-server-core/src/jwt.rs; no elliptic-curve arithmetic on secrets occurs" },
     { id = "RUSTSEC-2023-0071", reason = "rsa is pulled in by jsonwebtoken rust_crypto but only HS256 (HMAC) is used in mcp-server-core/src/jwt.rs; no RSA signing or decryption occurs, and no patched rsa release exists" },
-    { id = "RUSTSEC-2026-0462", reason = "affects only rmcp's Streamable HTTP clients (transport-streamable-http-client-reqwest and -unix-socket), which neither this server nor mcp-server-core enables: they use the server features only. Fixed in rmcp 3.9.0; remove this once mcp-server-core allows it (0.3.0 pins rmcp ~3.8.0)" },
 ]
 
 [licenses]
