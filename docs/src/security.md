@@ -12,6 +12,9 @@
 - **Payments need a person.** Without `REVOLUT_ALLOW_PAYMENTS`, the server can prepare payment
   drafts but not send them: they are approved in the Revolut Business app, under its approval
   rules. Payout links do move money once claimed, and need the key's pay access.
+- **Admin tools are writes.** Issuing, locking or terminating cards and inviting, suspending or
+  removing team members all count as changes: `REVOLUT_READ_ONLY` hides them, and the model is
+  told to confirm each with you. They also need the API key's access to cards and team members.
 - **No double payments.** Writes are never retried by the server, and each payment carries an
   idempotency key.
 - **Account text is data.** References, merchant and payee names are written by other people;

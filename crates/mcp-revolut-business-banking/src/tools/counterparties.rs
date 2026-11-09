@@ -57,7 +57,7 @@ pub struct CreateCounterpartyParams {
     pub bank_country: Option<String>,
     /// The account's currency, e.g. GBP. Needed with bank details.
     pub currency: Option<String>,
-    /// UK account number (8 digits).
+    /// The account number: 8 digits in the UK; elsewhere (the US, for one) as the bank gives it.
     pub account_no: Option<String>,
     /// UK sort code (6 digits).
     pub sort_code: Option<String>,
@@ -70,15 +70,40 @@ pub struct CreateCounterpartyParams {
     /// The counterparty's address, which some countries and currencies require: fields
     /// street_line1, street_line2, city, region, postcode, country (ISO alpha-2).
     pub address: Option<Map<String, Value>>,
+    /// Other fields some countries need, by Revolut's name, as get_counterparty_requirements
+    /// lists them: route, account_type, tax_id, national_id, phone, business_registration_id,
+    /// clabe, ifsc, bsb_code, bank_number or branch_code. Values are text.
+    pub more_fields: Option<Map<String, Value>>,
 }
+
+/// Fields `more_fields` may carry.
+pub const MORE_FIELDS: &[&str] = &[
+    "route",
+    "account_type",
+    "tax_id",
+    "national_id",
+    "phone",
+    "business_registration_id",
+    "clabe",
+    "ifsc",
+    "bsb_code",
+    "bank_number",
+    "branch_code",
+];
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ValidateNameParams {
-    /// UK account number (8 digits).
-    pub account_no: String,
-    /// UK sort code (6 digits).
-    pub sort_code: String,
+    /// UK: the account number (8 digits), with sort_code.
+    pub account_no: Option<String>,
+    /// UK: the sort code (6 digits), with account_no.
+    pub sort_code: Option<String>,
+    /// EUR (Verification of Payee): the IBAN, with recipient_country.
+    pub iban: Option<String>,
+    /// EUR: the BIC, when Revolut cannot work it out from the IBAN.
+    pub bic: Option<String>,
+    /// EUR: the bank's country, ISO 3166 alpha-2 such as FR.
+    pub recipient_country: Option<String>,
     /// The business name to check, for a business account.
     pub company_name: Option<String>,
     /// The person's first name, for a personal account.
@@ -157,8 +182,17 @@ fn counterparty_body(p: CreateCounterpartyParams) -> Result<Value, RvError> {
             "give either company_name or a person's name, not both",
         ));
     }
-    let account_no = opt_digits("account_no", p.account_no.as_deref(), 8)?;
     let sort_code = opt_digits("sort_code", p.sort_code.as_deref(), 6)?;
+    let uk = sort_code.is_some()
+        || p.bank_country
+            .as_deref()
+            .is_some_and(|c| c.trim().eq_ignore_ascii_case("GB"));
+    // UK account numbers are 8 digits; elsewhere (the US, for one) they vary.
+    let account_no = if uk {
+        opt_digits("account_no", p.account_no.as_deref(), 8)?
+    } else {
+        code("account_no", p.account_no.as_deref(), 4..=34)?
+    };
     let iban = code("iban", p.iban.as_deref(), 15..=34)?;
     let bic = code("bic", p.bic.as_deref(), 8..=11)?;
     let routing = opt_digits("routing_number", p.routing_number.as_deref(), 9)?;
@@ -209,7 +243,7 @@ fn counterparty_body(p: CreateCounterpartyParams) -> Result<Value, RvError> {
         (_, Some(_)) => Some("personal"),
         _ => None,
     });
-    Ok(Value::Object(fields(vec![
+    let mut body = fields(vec![
         ("profile_type", profile.and_then(s)),
         ("company_name", opt_s(company)),
         ("individual_name", individual),
@@ -222,7 +256,88 @@ fn counterparty_body(p: CreateCounterpartyParams) -> Result<Value, RvError> {
         ("bic", opt_s(bic)),
         ("routing_number", opt_s(routing)),
         ("address", p.address.map(Value::Object)),
-    ])))
+    ]);
+    if let Some(more) = p.more_fields {
+        for (k, v) in more {
+            if !MORE_FIELDS.contains(&k.as_str()) {
+                return Err(RvError::invalid(format!(
+                    "more_fields may only hold {}, not {k}",
+                    MORE_FIELDS.join(", ")
+                )));
+            }
+            if body.contains_key(&k) {
+                return Err(RvError::invalid(format!("{k} is given twice")));
+            }
+            let text = match &v {
+                Value::String(t) => text_limited(&k, Some(t), 100)?,
+                _ => return Err(RvError::invalid(format!("more_fields {k} must be text"))),
+            };
+            if let Some(t) = text {
+                body.insert(k, Value::String(t));
+            }
+        }
+    }
+    Ok(Value::Object(body))
+}
+
+/// The body of a name check: UK by account number and sort code, or EUR by IBAN.
+fn validation_body(p: ValidateNameParams) -> Result<Value, RvError> {
+    let company = text_limited("company_name", p.company_name.as_deref(), 200)?;
+    let individual = person(
+        text_arg("first_name", p.first_name.as_deref())?,
+        text_arg("last_name", p.last_name.as_deref())?,
+    );
+    if company.is_some() == individual.is_some() {
+        return Err(RvError::invalid(
+            "give either company_name or the person's first_name and last_name",
+        ));
+    }
+    let uk = p
+        .account_no
+        .as_deref()
+        .is_some_and(|a| !a.trim().is_empty())
+        || p.sort_code.as_deref().is_some_and(|a| !a.trim().is_empty());
+    let iban = code("iban", p.iban.as_deref(), 15..=34)?;
+    let mut body = match (uk, iban) {
+        (true, None) => fields(vec![
+            (
+                "account_no",
+                s(digits(
+                    "account_no",
+                    p.account_no.as_deref().unwrap_or(""),
+                    8,
+                )?),
+            ),
+            (
+                "sort_code",
+                s(digits(
+                    "sort_code",
+                    p.sort_code.as_deref().unwrap_or(""),
+                    6,
+                )?),
+            ),
+        ]),
+        (false, Some(iban)) => {
+            let country = code("recipient_country", p.recipient_country.as_deref(), 2..=2)?
+                .ok_or_else(|| RvError::invalid("an IBAN check needs recipient_country"))?;
+            fields(vec![
+                ("iban", s(iban)),
+                ("bic", opt_s(code("bic", p.bic.as_deref(), 8..=11)?)),
+                ("recipient_country", s(country)),
+                ("recipient_currency", s("EUR")),
+            ])
+        }
+        _ => {
+            return Err(RvError::invalid(
+                "give a UK account_no and sort_code, or a EUR iban and recipient_country",
+            ));
+        }
+    };
+    body.extend(fields(vec![
+        ("company_name", opt_s(company)),
+        ("individual_name", individual),
+    ]));
+    Ok(Value::Object(body))
 }
 
 #[tool_router(router = counterparties_router, vis = "pub(crate)")]
@@ -296,7 +411,7 @@ impl BankingServer {
     }
 
     #[tool(
-        description = "Saves a new counterparty to pay: a business (company_name) or person (first_name, last_name) with bank details (UK: account_no and sort_code; elsewhere: iban and bic; US: account_no and routing_number), bank_country and currency; or a Revolut user by revtag. For UK accounts, check the name first with validate_account_name. Confirm the details with the person first.",
+        description = "Saves a new counterparty to pay: a business (company_name) or person (first_name, last_name) with bank details (UK: account_no and sort_code; elsewhere: iban and bic; US: account_no and routing_number), bank_country and currency; or a Revolut user by revtag. Outside the UK, call get_counterparty_requirements first and pass any extra fields it lists in more_fields. For UK and EUR accounts, check the name first with validate_account_name. Confirm the details with the person first.",
         annotations(open_world_hint = true)
     )]
     pub async fn create_counterparty(
@@ -348,7 +463,7 @@ impl BankingServer {
     }
 
     #[tool(
-        description = "Confirmation of Payee for a UK account: asks the recipient's bank whether the name matches the account number and sort code, before saving or paying it. The answer says matched, close match (with the name the bank holds), not matched, or could not check. Nothing is saved.",
+        description = "Checks the name on an account with the recipient's bank before saving or paying it: Confirmation of Payee for a UK account (account_no and sort_code), or Verification of Payee for a EUR account (iban and recipient_country). The answer says matched, close match (with the name the bank holds), not matched, or could not check, and a name_validation_id. Nothing is saved.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn validate_account_name(
@@ -357,22 +472,7 @@ impl BankingServer {
     ) -> Result<CallToolResult, McpError> {
         run("validate_account_name", async {
             let c = self.caller();
-            let company = text_limited("company_name", p.company_name.as_deref(), 200)?;
-            let individual = person(
-                text_arg("first_name", p.first_name.as_deref())?,
-                text_arg("last_name", p.last_name.as_deref())?,
-            );
-            if company.is_some() == individual.is_some() {
-                return Err(RvError::invalid(
-                    "give either company_name or the person's first_name and last_name",
-                ));
-            }
-            let body = Value::Object(fields(vec![
-                ("account_no", s(digits("account_no", &p.account_no, 8)?)),
-                ("sort_code", s(digits("sort_code", &p.sort_code, 6)?)),
-                ("company_name", opt_s(company)),
-                ("individual_name", individual),
-            ]));
+            let body = validation_body(p)?;
             let a = c
                 .send(
                     Method::POST,

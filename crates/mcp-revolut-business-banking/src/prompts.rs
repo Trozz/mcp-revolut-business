@@ -98,6 +98,24 @@ pub const PROMPTS: &[PromptSpec] = &[
         )],
         render: unusual_spending,
     },
+    PromptSpec {
+        name: "statement_for_freeagent",
+        title: "Statement for FreeAgent",
+        description: "Export a Revolut account's statement for a period as a CSV in FreeAgent's bank statement format, check it against the balances, and explain how to upload it (or upload it with the FreeAgent tools when they are connected).",
+        arguments: &[
+            arg(
+                "account",
+                "Which Revolut account, by name or currency, e.g. \"Main\" or GBP.",
+                true,
+            ),
+            arg(
+                "period",
+                "The dates, e.g. \"October 2026\" or 2026-10-01 to 2026-10-31. Default: last month.",
+                false,
+            ),
+        ],
+        render: statement_for_freeagent,
+    },
 ];
 
 fn footer(writes: bool) -> String {
@@ -127,8 +145,8 @@ fn monthly_review(p: &str, a: &Args) -> String {
     format!(
         "Review one month of the business's Revolut Business transactions.\n\n\
 <month>{}</month>\n\n\
-If no month is given, use last month. Call `{p}list_accounts`, then `{p}list_transactions` with from the first day of the month and to the first day of the next, count 1000; if it says there may be more, call again with to set as it suggests until you have the whole month.\n\n\
-Report, per currency: money in, money out and net; the ten largest outgoing payments; fees in total; card spend grouped by merchant, largest first; exchanges between currencies; and every transaction that was declined, failed or reverted, with its reason. Point out anything worth a closer look. Change nothing.\n\n{}",
+If no month is given, use last month. Call `{p}list_accounts`, then `{p}summarise_transactions` once with from the first day of the month and to the first day of the next: it totals every transaction on the server. Only if something needs a closer look, read the transactions behind it with `{p}list_transactions` or `{p}get_transaction`.\n\n\
+Report, per currency: money in, money out and net; transfers between the business's own accounts and exchanges, kept apart; fees in total; the largest payments out and in; card spend by merchant, largest first; and every transaction that was declined, failed or reverted, with its reason. Point out anything worth a closer look. Change nothing.\n\n{}",
         a.get("month"),
         footer(false)
     )
@@ -151,9 +169,23 @@ fn unusual_spending(p: &str, a: &Args) -> String {
     format!(
         "Check the business's recent spending for anything unusual.\n\n\
 <days>{}</days>\n\n\
-If no number of days is given, look at the last 30. Call `{p}list_transactions` with from that many days ago and count 1000, `{p}list_cards` for who holds which card, and `{p}list_counterparties` to know the usual payees.\n\n\
+If no number of days is given, look at the last 30. Call `{p}summarise_transactions` with from that many days ago for the overall picture (top merchants, largest payments, declines), then `{p}list_transactions` with the same from and a count that fits for the detail, `{p}list_cards` for who holds which card, and `{p}list_counterparties` to know the usual payees.\n\n\
 Flag, with the transaction and card or payee each time: merchants or payees not seen before in the period, unusually large amounts, the same charge repeated, payments in a foreign currency or country, card payments at night, and declined attempts. Say how sure you are about each and what is probably fine. If a card looks compromised, offer to freeze it with `{p}freeze_card`.\n\n{}",
         a.get("days"),
+        footer(true)
+    )
+}
+
+fn statement_for_freeagent(p: &str, a: &Args) -> String {
+    format!(
+        "Make a statement of a Revolut Business account to import into FreeAgent.\n\n\
+<account>{}</account>\n<period>{}</period>\n\n\
+1. Find the account with `{p}list_accounts`; if the description matches more than one, ask me which.\n\
+2. Work out the first and last day of the period (default: last month) and call `{p}export_statement` with format freeagent. If it says the statement is too long, split the period in two and export each half.\n\
+3. Check it: the number of lines, the net change, and the closing balance against the account's balance now (they match when the period runs to today). Say if anything looks off.\n\
+4. Give me the CSV in a code block, named like revolut-<account>-<from>-<to>.csv. If FreeAgent tools are available, offer to upload it to the matching FreeAgent bank account with them, and do so only after I agree; otherwise tell me to upload it in FreeAgent under Banking, the bank account, Upload statement.\n\n{}",
+        a.get("account"),
+        a.get("period"),
         footer(true)
     )
 }
