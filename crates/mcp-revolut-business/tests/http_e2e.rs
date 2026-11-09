@@ -199,7 +199,7 @@ async fn tools_and_prompts_are_served_and_payments_stay_hidden() {
     );
     assert!(!names.contains(&"create_payment"), "{names:?}");
     let prompts = call(&app, "/revolut", &sid, "prompts/list", json!({})).await;
-    assert_eq!(prompts["result"]["prompts"].as_array().unwrap().len(), 4);
+    assert_eq!(prompts["result"]["prompts"].as_array().unwrap().len(), 5);
     // A tool call reaches the client; Revolut is unreachable here, so it reports upstream.
     let r = call(
         &app,

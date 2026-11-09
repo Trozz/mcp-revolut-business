@@ -32,6 +32,11 @@ pub struct PayParams {
     pub reference: Option<String>,
     /// Who pays the fees for international payments: shared, debtor or prefer_debtor.
     pub charge_bearer: Option<String>,
+    /// A transfer reason code, where the destination needs one (list_transfer_reasons).
+    pub transfer_reason_code: Option<String>,
+    /// The name_validation_id validate_account_name returned for this recipient, to show the
+    /// name was checked.
+    pub name_validation_id: Option<String>,
     /// To retry a payment whose answer was lost, the request_id it returned. Revolut makes a
     /// payment once per request_id, so a retry cannot pay twice. Leave out for a new payment.
     pub request_id: Option<String>,
@@ -109,6 +114,17 @@ pub(crate) fn pay_body(p: &PayParams, rid: &str) -> Result<Value, RvError> {
                 &["shared", "debtor", "prefer_debtor"],
             )?
             .and_then(s),
+        ),
+        (
+            "transfer_reason_code",
+            super::quotes::reason_code(p.transfer_reason_code.as_deref())?,
+        ),
+        (
+            "name_validation_id",
+            opt_s(super::opt_id(
+                "name_validation_id",
+                p.name_validation_id.as_deref(),
+            )?),
         ),
     ])))
 }
