@@ -48,6 +48,8 @@ pub struct DraftPayment {
     pub reference: String,
     /// Who pays the transfer fees for international payments: shared or debtor.
     pub charge_bearer: Option<String>,
+    /// A transfer reason code, where the destination needs one (list_transfer_reasons).
+    pub transfer_reason_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -111,6 +113,10 @@ fn draft_body(p: CreateDraftParams) -> Result<Value, RvError> {
                     &["shared", "debtor"],
                 )?
                 .and_then(s),
+            ),
+            (
+                "transfer_reason_code",
+                super::quotes::reason_code(pay.transfer_reason_code.as_deref())?,
             ),
         ])));
     }
