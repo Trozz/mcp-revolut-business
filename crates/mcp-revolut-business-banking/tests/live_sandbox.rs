@@ -136,6 +136,15 @@ async fn saves_and_deletes_a_counterparty() {
         .and_then(|a| a["id"].as_str())
         .expect("a GBP account")
         .to_string();
+    // What paying it would cost: nothing is paid.
+    let quote = s
+        .get_payment_quote(params(
+            json!({"account_id": gbp, "counterparty_id": id, "amount": "1.00", "currency": "GBP"}),
+        ))
+        .await
+        .unwrap();
+    eprintln!("quote: {:?}", quote.content[0].as_text().map(|t| &t.text));
+    assert_ne!(quote.is_error, Some(true));
     let draft = json(
         &s.create_payment_draft(params(json!({"title": "MCP live test", "payments": [
             {"account_id": gbp, "counterparty_id": id, "amount": "1.00", "currency": "GBP", "reference": "MCP test"}
@@ -165,4 +174,124 @@ async fn saves_and_deletes_a_counterparty() {
             .unwrap(),
     );
     assert_eq!(gone, json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn summaries_statements_and_payment_helpers() {
+    let s = skip_without_sandbox!();
+    let sum = json(
+        &s.summarise_transactions(params(json!({"from": "2026-01-01"})))
+            .await
+            .unwrap(),
+    );
+    assert!(sum["transactions"].as_u64().is_some(), "{sum}");
+    eprintln!("summary: {sum}");
+    let accounts = json(&s.list_accounts(params(json!({}))).await.unwrap());
+    let gbp = accounts["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["currency"] == "GBP")
+        .and_then(|a| a["id"].as_str())
+        .unwrap()
+        .to_string();
+    for format in ["freeagent", "full"] {
+        let r = s
+            .export_statement(params(
+                json!({"account_id": gbp, "from": "2026-01-01", "format": format}),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{format}: {:?}", r.content);
+        eprintln!(
+            "{format}: {}\n{}",
+            r.content[0].as_text().unwrap().text,
+            r.content
+                .get(1)
+                .map(|c| c
+                    .as_text()
+                    .unwrap()
+                    .text
+                    .lines()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+                .unwrap_or_default()
+        );
+    }
+    let reqs = json(
+        &s.get_counterparty_requirements(params(
+            json!({"country": "US", "currency": "USD", "recipient_type": "business"}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert!(reqs["fields"].is_array(), "{reqs}");
+    json(
+        &s.list_transfer_reasons(params(json!({"country": "IN"})))
+            .await
+            .unwrap(),
+    );
+    // A quote to a payee with a GBP account: nothing is paid.
+    let cps = json(&s.list_counterparties(params(json!({}))).await.unwrap());
+    let payee = cps["items"].as_array().unwrap().iter().find(|c| {
+        c["accounts"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x["currency"] == "GBP"))
+    });
+    if let Some(cp) = payee {
+        let q = json(
+            &s.get_payment_quote(params(json!({"account_id": gbp, "counterparty_id": cp["id"], "amount": "1", "currency": "GBP"})))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            q.get("estimated_total").is_some() || q.get("fee").is_some(),
+            "{q}"
+        );
+    } else {
+        eprintln!("no payee with a GBP account; quote skipped");
+    }
+}
+
+#[tokio::test]
+async fn team_reads_and_a_virtual_card_round_trip() {
+    let s = skip_without_sandbox!();
+    let roles = json(&s.list_roles(params(json!({}))).await.unwrap());
+    assert!(roles["count"].as_u64().unwrap() > 0, "{roles}");
+    let team = json(&s.list_team_members(params(json!({}))).await.unwrap());
+    let Some(m) = team["items"][0]["id"].as_str() else {
+        eprintln!("the sandbox has no team members; skipping cards");
+        return;
+    };
+    json(
+        &s.get_team_member(params(json!({"team_member_id": m})))
+            .await
+            .unwrap(),
+    );
+    let made = s
+        .create_virtual_card(params(json!({"holder_id": m, "label": "MCP live test",
+            "spending_limits": {"month": {"amount": "10", "currency": "GBP"}}})))
+        .await
+        .unwrap();
+    if made.is_error == Some(true) {
+        eprintln!(
+            "the sandbox did not issue a card: {:?}",
+            made.content[0].as_text().map(|t| &t.text)
+        );
+        return;
+    }
+    let id = json(&made)["id"].as_str().unwrap().to_string();
+    json(
+        &s.update_card(params(json!({"card_id": id, "label": "MCP live test 2"})))
+            .await
+            .unwrap(),
+    );
+    json(&s.lock_card(params(json!({"card_id": id}))).await.unwrap());
+    json(&s.unlock_card(params(json!({"card_id": id}))).await.unwrap());
+    json(
+        &s.terminate_card(params(json!({"card_id": id})))
+            .await
+            .unwrap(),
+    );
 }

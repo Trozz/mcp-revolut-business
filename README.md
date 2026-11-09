@@ -90,15 +90,23 @@ TLS, proxies, logging, metrics and tracing are configured as in
 | Overview | `business_snapshot` |
 | Accounts | `list_accounts`, `get_account`, `get_account_bank_details`, `get_exchange_rate` |
 | Transactions | `list_transactions`, `get_transaction` |
-| Counterparties | `list_counterparties`, `get_counterparty`, `create_counterparty`, `delete_counterparty`, `validate_account_name` |
+| Statements | `summarise_transactions` (totals, fees, top merchants, worked out on the server), `export_statement` (CSV, including FreeAgent's format) |
+| Counterparties | `list_counterparties`, `get_counterparty`, `create_counterparty`, `delete_counterparty`, `validate_account_name` (UK and EUR), `get_counterparty_requirements` |
+| Before paying | `get_payment_quote` (fee, rate and arrival), `list_transfer_reasons` |
 | Payment drafts | `list_payment_drafts`, `get_payment_draft`, `create_payment_draft`, `delete_payment_draft` |
 | Payments (opt-in) | `create_payment`, `transfer_between_accounts`, `exchange_currency` |
 | Payout links | `list_payout_links`, `get_payout_link`, `create_payout_link`, `cancel_payout_link` |
 | Cards | `list_cards`, `get_card`, `freeze_card`, `unfreeze_card` |
-| Team | `list_team_members`, `list_expenses`, `get_expense` |
+| Card admin | `create_virtual_card`, `update_card`, `lock_card`, `unlock_card`, `terminate_card` |
+| Team | `list_team_members`, `get_team_member`, `list_roles`, `list_expenses`, `get_expense` |
+| Team admin | `invite_team_member`, `change_team_member_role`, `suspend_team_member`, `unsuspend_team_member`, `remove_team_member` |
 | Anything else | `api_get` (read only) |
 
-Prompts: `account_overview`, `monthly_review`, `pay_supplier` and `unusual_spending`.
+Prompts: `account_overview`, `monthly_review`, `pay_supplier`, `unusual_spending` and
+`statement_for_freeagent`.
+
+All 48 tools are offered unless hidden: the three that move money at once need
+`REVOLUT_ALLOW_PAYMENTS=true`, and `REVOLUT_READ_ONLY` hides everything that changes anything.
 
 Card numbers and CVVs are never returned. Text in the account (references, merchant and payee
 names) is treated as data, not instructions.

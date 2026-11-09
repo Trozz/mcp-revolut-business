@@ -401,3 +401,368 @@ async fn api_get_reaches_other_endpoints_but_not_auth() {
     }
     assert_eq!(fake.lock().refused_signatures, 0);
 }
+
+fn tx(id: usize, at: &str, amount: f64) -> serde_json::Value {
+    json!({"id": format!("t{id}"), "type": "card_payment", "state": "completed", "created_at": at, "completed_at": at,
+        "merchant": {"name": if id.is_multiple_of(2) { "Even Ltd" } else { "Odd Ltd" }},
+        "legs": [{"account_id": GBP, "amount": amount, "fee": 0, "currency": "GBP", "description": format!("Shop {id}")}]})
+}
+
+#[tokio::test]
+async fn summaries_page_through_every_transaction_once() {
+    let fake = FakeRevolut::start().await;
+    // A full first page whose oldest instant is shared with the second page's first item.
+    let mut first: Vec<serde_json::Value> = (0..1000)
+        .map(|i| tx(i, &format!("2026-10-{:02}T12:00:00Z", 30 - (i / 40)), -1.0))
+        .collect();
+    first[999] = tx(999, "2026-10-05T12:00:00.000Z", -1.0);
+    let second = vec![
+        tx(999, "2026-10-05T12:00:00.000Z", -1.0),
+        tx(1000, "2026-10-05T12:00:00.000Z", -2.5),
+        tx(1001, "2026-10-02T09:00:00Z", 100.0),
+    ];
+    fake.on_seq(
+        "GET",
+        "transactions",
+        vec![Canned::ok(json!(first)), Canned::ok(json!(second))],
+    );
+    let v = json(
+        &server(&fake)
+            .summarise_transactions(params(json!({"from": "2026-10-01", "to": "2026-11-01"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["transactions"], 1002, "the repeated t999 is counted once");
+    assert_eq!(v["by_currency"]["GBP"]["money_out"], "1002.50");
+    assert_eq!(v["by_currency"]["GBP"]["money_in"], "100.00");
+    assert_eq!(v["top_merchants"][0]["merchant"], "Even Ltd");
+    let log = fake.log();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[1].param("to"), Some("2026-10-05T12:00:00.001Z"));
+    assert_eq!(log[1].param("from"), Some("2026-10-01"));
+    assert!(v.get("truncated").is_none());
+}
+
+#[tokio::test]
+async fn statements_come_as_csv_for_one_account() {
+    let fake = FakeRevolut::start().await;
+    fake.on(
+        "GET",
+        "transactions",
+        Canned::ok(json!([
+            {"id": "b", "type": "transfer", "state": "completed", "created_at": "2026-10-03T10:00:00Z", "completed_at": "2026-10-03T10:00:00Z",
+             "legs": [{"account_id": GBP, "amount": -20, "fee": 0.3, "currency": "GBP", "description": "To Acme", "balance": 79.7}]},
+            {"id": "a", "type": "topup", "state": "completed", "created_at": "2026-10-01T10:00:00Z", "completed_at": "2026-10-01T10:00:00Z",
+             "legs": [{"account_id": GBP, "amount": 100, "currency": "GBP", "description": "Top up", "balance": 100}]}
+        ])),
+    );
+    let r = server(&fake)
+        .export_statement(params(json!({"account_id": GBP, "from": "2026-10-01", "to": "2026-10-31", "format": "FreeAgent"})))
+        .await
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_str(&support::tools::text(&r)).unwrap();
+    assert_eq!(summary["lines"], 2);
+    assert_eq!(summary["net_change"], "79.70");
+    assert_eq!(summary["closing_balance"], "79.70");
+    let csv = r.content[1].as_text().unwrap().text.clone();
+    assert_eq!(
+        csv,
+        "01/10/2026,100.00,Top up\n03/10/2026,-20.00,To Acme\n03/10/2026,-0.30,Fee: To Acme\n"
+    );
+    let l = fake.last("GET", "transactions");
+    assert_eq!(l.param("account"), Some(GBP));
+    assert_eq!(
+        l.param("to"),
+        Some("2026-11-01"),
+        "the last day is included"
+    );
+    let t = error_text(
+        &server(&fake)
+            .export_statement(params(
+                json!({"account_id": GBP, "from": "2026-10-31", "to": "2026-10-01"}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(t.contains("from must not be after to"), "{t}");
+}
+
+#[tokio::test]
+async fn quotes_requirements_and_reasons() {
+    let fake = FakeRevolut::start().await;
+    fake.on(
+        "POST",
+        "pay/indicative-quote",
+        Canned::ok(json!({"amount": {"amount": 100, "currency": "USD"}, "fee": {"amount": 1.5, "currency": "GBP"},
+            "estimated_total": {"amount": 80.5, "currency": "GBP"}, "estimated_exchange_rate": "1.27", "warnings": ["volatile_fx_rate"]})),
+    );
+    fake.on(
+        "GET",
+        "counterparties/fields",
+        Canned::ok(json!({"fields": [{"name": "routing_number", "required": true}, {"name": "route", "required": true, "options": [{"value": "ach"}]}]})),
+    );
+    fake.on("GET", "transfer-reasons", Canned::ok(json!([{"country": "IN", "currency": "INR", "code": "services", "description": "Services"}])));
+    let s = server(&fake);
+    let v = json(
+        &s.get_payment_quote(params(json!({"account_id": GBP, "counterparty_id": CP, "amount": "100", "currency": "usd", "charge_bearer": "shared"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["warnings"], json!(["volatile_fx_rate"]));
+    let body = fake.last("POST", "pay/indicative-quote").body.unwrap();
+    assert_eq!(
+        body,
+        json!({"account_id": GBP, "receiver": {"counterparty_id": CP}, "amount": 100, "currency": "USD", "charge_bearer": "shared"})
+    );
+    let v = json(
+        &s.get_counterparty_requirements(params(json!({"country": "us", "currency": "USD", "recipient_type": "Business", "route": "ACH"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["fields"][0]["name"], "routing_number");
+    let l = fake.last("GET", "counterparties/fields");
+    assert_eq!(l.param("country"), Some("US"));
+    assert_eq!(l.param("recipient_type"), Some("business"));
+    assert_eq!(l.param("route"), Some("ach"));
+    assert_eq!(
+        json(
+            &s.list_transfer_reasons(params(json!({"country": "in"})))
+                .await
+                .unwrap()
+        )["count"],
+        1
+    );
+    assert_eq!(
+        json(
+            &s.list_transfer_reasons(params(json!({"currency": "EUR"})))
+                .await
+                .unwrap()
+        )["count"],
+        0
+    );
+    assert!(
+        error_text(&s.list_transfer_reasons(params(json!({}))).await.unwrap())
+            .contains("give a country")
+    );
+    assert_eq!(fake.lock().refused_signatures, 0);
+}
+
+#[tokio::test]
+async fn names_are_checked_for_uk_and_eur_accounts() {
+    let fake = FakeRevolut::start().await;
+    fake.on("POST", "account-name-validation", Canned::ok(json!({"result_code": "close_match", "company_name": "Acme Limited", "name_validation_id": "nv-1"})));
+    let s = server(&fake);
+    let v = json(
+        &s.validate_account_name(params(json!({"iban": "FR76 3000 6000 0112 3456 7890 189", "recipient_country": "fr", "company_name": "Acme"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["result_code"], "close_match");
+    assert_eq!(
+        fake.last("POST", "account-name-validation").body.unwrap(),
+        json!({"iban": "FR7630006000011234567890189", "recipient_country": "FR", "recipient_currency": "EUR", "company_name": "Acme"})
+    );
+    json(
+        &s.validate_account_name(params(json!({"account_no": "12345678", "sort_code": "12-34-56", "first_name": "Ann", "last_name": "Lee"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        fake.last("POST", "account-name-validation").body.unwrap(),
+        json!({"account_no": "12345678", "sort_code": "123456", "individual_name": {"first_name": "Ann", "last_name": "Lee"}})
+    );
+    for bad in [
+        json!({"company_name": "Acme"}),
+        json!({"iban": "FR7630006000011234567890189", "company_name": "Acme"}),
+        json!({"account_no": "12345678", "sort_code": "123456", "iban": "FR7630006000011234567890189", "company_name": "Acme"}),
+    ] {
+        let t = error_text(&s.validate_account_name(params(bad.clone())).await.unwrap());
+        assert!(t.starts_with("validation:"), "{bad}: {t}");
+    }
+}
+
+#[tokio::test]
+async fn counterparties_abroad_take_more_fields() {
+    let fake = FakeRevolut::start().await;
+    fake.on("POST", "counterparty", Canned::ok(json!({"id": CP})));
+    let s = server(&fake);
+    json(
+        &s.create_counterparty(params(json!({"company_name": "Acme Inc", "account_no": "000123456789", "routing_number": "021000021",
+            "bank_country": "US", "currency": "USD", "more_fields": {"route": "ach", "account_type": "checking"}})))
+            .await
+            .unwrap(),
+    );
+    let body = fake.last("POST", "counterparty").body.unwrap();
+    assert_eq!(body["route"], "ach");
+    assert_eq!(body["account_type"], "checking");
+    let t = error_text(
+        &s.create_counterparty(params(
+            json!({"revtag": "x", "more_fields": {"request_id": "x"}}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert!(t.contains("more_fields may only hold"), "{t}");
+}
+
+#[tokio::test]
+async fn cards_are_issued_changed_locked_and_terminated() {
+    let fake = FakeRevolut::start().await;
+    fake.on(
+        "POST",
+        "cards",
+        Canned::ok(json!({"id": "c9", "virtual": true, "state": "active", "label": "Ads"})),
+    );
+    fake.on(
+        "PATCH",
+        "cards/c9",
+        Canned::ok(json!({"id": "c9", "label": "Ads 2"})),
+    );
+    for path in ["cards/c9/lock", "cards/c9/unlock"] {
+        fake.on("POST", path, Canned::status(204, serde_json::Value::Null));
+    }
+    fake.on(
+        "DELETE",
+        "cards/c9",
+        Canned::status(204, serde_json::Value::Null),
+    );
+    let s = server(&fake);
+    let v = json(
+        &s.create_virtual_card(params(json!({"label": "Ads", "contact_ids": [GBP], "spending_limits": {"month": {"amount": "500", "currency": "GBP"}}, "account_ids": [GBP]})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["id"], "c9");
+    let body = fake.last("POST", "cards").body.unwrap();
+    assert_eq!(body["virtual"], true);
+    assert_eq!(body["accounts"], json!([GBP]));
+    assert_eq!(body["request_id"].as_str().unwrap().len(), 36);
+    json(
+        &s.update_card(params(json!({"card_id": "c9", "label": "Ads 2"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        fake.last("PATCH", "cards/c9").body.unwrap(),
+        json!({"label": "Ads 2"})
+    );
+    assert_eq!(
+        json(&s.lock_card(params(json!({"card_id": "c9"}))).await.unwrap())["state"],
+        "locked"
+    );
+    json(
+        &s.unlock_card(params(json!({"card_id": "c9"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        json(
+            &s.terminate_card(params(json!({"card_id": "c9"})))
+                .await
+                .unwrap()
+        )["state"],
+        "terminated"
+    );
+    assert_eq!(fake.lock().refused_signatures, 0);
+}
+
+#[tokio::test]
+async fn the_team_is_managed() {
+    let fake = FakeRevolut::start().await;
+    let m = "7f1e2d3c-0000-4000-8000-000000000001";
+    fake.on(
+        "GET",
+        "roles",
+        Canned::ok(json!([{"id": "Owner", "name": "Owner"}, {"id": "r-1", "name": "Accountant"}])),
+    );
+    fake.on(
+        "POST",
+        "team-members",
+        Canned::status(
+            201,
+            json!({"id": m, "email": "ann@example.com", "role_id": "r-1"}),
+        ),
+    );
+    fake.on(
+        "PUT",
+        &format!("team-members/{m}/role"),
+        Canned::status(204, serde_json::Value::Null),
+    );
+    for a in ["suspend", "unsuspend"] {
+        fake.on(
+            "POST",
+            &format!("team-members/{m}/{a}"),
+            Canned::status(204, serde_json::Value::Null),
+        );
+    }
+    fake.on(
+        "DELETE",
+        &format!("team-members/{m}"),
+        Canned::status(204, serde_json::Value::Null),
+    );
+    fake.on(
+        "GET",
+        &format!("team-members/{m}"),
+        Canned::ok(json!({"id": m, "email": "ann@example.com", "state": "active"})),
+    );
+    let s = server(&fake);
+    assert_eq!(
+        json(&s.list_roles(params(json!({}))).await.unwrap())["count"],
+        2
+    );
+    json(
+        &s.invite_team_member(params(
+            json!({"email": "ann@example.com", "role_id": "r-1"}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(
+        fake.last("POST", "team-members").body.unwrap(),
+        json!({"email": "ann@example.com", "role_id": "r-1"})
+    );
+    json(
+        &s.change_team_member_role(params(json!({"team_member_id": m, "role_id": "Owner"})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        fake.last("PUT", &format!("team-members/{m}/role"))
+            .body
+            .unwrap(),
+        json!({"role_id": "Owner"})
+    );
+    json(
+        &s.suspend_team_member(params(json!({"team_member_id": m})))
+            .await
+            .unwrap(),
+    );
+    json(
+        &s.unsuspend_team_member(params(json!({"team_member_id": m})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        json(
+            &s.get_team_member(params(json!({"team_member_id": m})))
+                .await
+                .unwrap()
+        )["state"],
+        "active"
+    );
+    assert_eq!(
+        json(
+            &s.remove_team_member(params(json!({"team_member_id": m})))
+                .await
+                .unwrap()
+        )["state"],
+        "removed"
+    );
+    let t = error_text(
+        &s.invite_team_member(params(json!({"email": "not an email", "role_id": "r-1"})))
+            .await
+            .unwrap(),
+    );
+    assert!(t.starts_with("validation:"), "{t}");
+    assert_eq!(fake.lock().refused_signatures, 0);
+}
